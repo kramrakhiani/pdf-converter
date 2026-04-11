@@ -191,8 +191,3 @@ ql-out/
 *.docx
 *.pptx
 *.heic
-!sample-image.pdf
-!sample.docx
-!sample.heic
-!sample.txt
-!deck.txt
