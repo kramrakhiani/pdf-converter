@@ -1,0 +1,6 @@
+pymupdf
+python-docx
+python-pptx
+reportlab
+pypdf
+pillow
