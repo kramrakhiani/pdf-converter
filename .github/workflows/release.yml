@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macos
+            artifact: OfflineConverter-macos.zip
+            build_cmd: python build.py
+          - os: windows-latest
+            name: windows
+            artifact: OfflineConverter-windows.zip
+            build_cmd: python build.py
+          - os: ubuntu-latest
+            name: linux
+            artifact: OfflineConverter-linux.tar.gz
+            build_cmd: python build.py
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Build on ${{ matrix.name }}
+        run: ${{ matrix.build_cmd }}
+
+      - name: Package macOS
+        if: matrix.name == 'macos'
+        run: |
+          cd dist
+          zip -r OfflineConverter-macos.zip OfflineConverter.app
+
+      - name: Package Windows
+        if: matrix.name == 'windows'
+        run: |
+          cd dist
+          powershell -Command "Compress-Archive -Path 'OfflineConverter.exe' -DestinationPath 'OfflineConverter-windows.zip' -Force"
+
+      - name: Package Linux
+        if: matrix.name == 'linux'
+        run: |
+          cd dist
+          tar -czf OfflineConverter-linux.tar.gz offline_converter
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+
+      - name: Create Release
+        if: matrix.name == 'linux'
+        uses: softprops/action-gh-release@1
+        with:
+          files: |
+            dist/OfflineConverter-macos.zip
+            dist/OfflineConverter-windows.zip
+            dist/OfflineConverter-linux.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
