@@ -237,6 +237,3 @@ MIT License — feel free to use this tool for personal and commercial projects.
 - **Pillow** — Image processing
 - **Tesseract** — OCR engine
 
----
-
-# pdfconverter
