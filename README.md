@@ -1,25 +1,23 @@
 # Offline Document Converter
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-cross--platform-lightgrey.svg)](#installation)
-
-A **privacy-first** Python CLI and GUI for local file conversion. No cloud uploads, no data collection — your documents never leave your machine. Designed for sensitive workflows like ID cards, personal records, and internal documents.
+A **privacy-first** offline document converter. No cloud uploads, no data collection — your documents never leave your machine. Designed for sensitive workflows like ID cards, personal records, and internal documents.
 
 ## Features
 
 ### Privacy & Security
-- **100% offline** — all conversions happen locally on your machine
+- **100% offline** — all conversions happen locally
 - **No telemetry** — no data is sent to external servers
-- **Sensitive Document Mode** — optimized paths for IDs, certificates, and appearance-critical files
+- **Sensitive Document Mode** — 300 DPI for IDs, certificates, and appearance-critical files
 - **SHA-256 verification** — every conversion includes checksum verification
+- **File validation** — magic byte verification ensures file type integrity
 
 ### Supported Conversions
 
 | From | To |
 |------|-----|
-| `.docx` | `.pdf`, `.txt`, `.docx` |
-| `.pptx` | `.pdf`, `.txt`, `.pptx` |
+| `.docx` / `.doc` | `.pdf`, `.txt`, `.docx` |
+| `.pptx` / `.ppt` | `.pdf`, `.txt`, `.pptx` |
+| `.xlsx` / `.xls` | `.pdf`, `.txt`, `.csv` |
 | `.pdf` | `.docx`, `.txt`, `.html`, `.md`, `.rtf`, `.pptx` |
 | `.txt/.md/.html/.rtf` | `.pdf`, `.docx`, `.pptx` |
 | Images (PNG/JPG/BMP/GIF/TIFF/WebP) | `.pdf` |
@@ -27,38 +25,41 @@ A **privacy-first** Python CLI and GUI for local file conversion. No cloud uploa
 ### PDF Utilities
 - **Merge PDFs** — combine multiple PDF files into one
 - **Split PDFs** — extract individual pages as separate files
-- **Compress PDFs** — reduce file size with content stream compression
-- **Extract Images** — pull embedded images from PDF documents
+- **Compress PDFs** — reduce file size
+- **Extract Images** — pull embedded images from PDF
 
-### Smart Rendering
-- **Auto mode** — automatically selects the best available renderer
-- **Native mode** — uses system Office applications for highest fidelity
-- **Python fallback** — pure Python rendering when native tools aren't available
+### Usage
 
-### Multiple Interfaces
-- **CLI** — full-featured command-line interface
-- **Interactive terminal menu** — guided step-by-step conversion
-- **Desktop GUI** — user-friendly graphical interface built with Tkinter
-
-
-### Installation
-
+**Run the GUI:**
 ```bash
-# Install Python dependencies from requirements.txt
-python3 -m pip install --user -r requirements.txt
-
-# Or install individually
-python3 -m pip install --user pymupdf python-docx python-pptx reportlab pypdf pillow
-
-# Optional: Install Tesseract for OCR support
-# macOS: brew install tesseract
-# Ubuntu: sudo apt install tesseract-ocr
-# Windows: Download from GitHub releases
-
-# Optional: Install LibreOffice for higher-fidelity conversions
-# macOS: brew install --cask libreoffice
-# Ubuntu: sudo apt install libreoffice
+python3 offline_converter.py
 ```
+
+**CLI conversion:**
+```bash
+# Single file - saves next to original
+python3 offline_converter.py convert document.txt --to pdf
+
+# Batch convert
+python3 offline_converter.py convert file1.pdf file2.pdf --to docx
+
+# Directory conversion
+python3 offline_converter.py convert-dir ./docs --from-ext pdf --to txt
+```
+
+**Build standalone app:**
+```bash
+pip install pyinstaller
+python build.py
+# Output: dist/OfflineConverter.app (48MB)
+```
+
+### Requirements
+```
+pymupdf python-docx python-pptx reportlab pypdf pillow openpyxl pytesseract
+```
+
+Optional for better quality: `brew install tesseract libreoffice`
 
 ### Basic Usage
 
@@ -139,15 +140,13 @@ python3 offline_converter.py convert-dir ./folder --from-ext pdf --to docx --out
 
 ```
 offline_converter_app/
-├── cli.py          # Command-line interface and argument parsing
-├── common.py       # Shared types, utilities, and tool detection
-├── converter.py    # Main conversion orchestration logic
-├── extractors.py   # Text extraction from various formats
-├── gui.py          # Tkinter-based graphical user interface
-├── pdf_utils.py    # PDF merge, split, compress, and image extraction
-├── renderers.py    # Native Office rendering (LibreOffice, MS Word/PPT)
-├── verify.py       # Output verification and checksum generation
-└── writers.py      # Output file generation for all formats
+├── cli.py          # CLI interface
+├── converter.py    # Core conversion logic
+├── writers.py      # File generation (PDF, DOCX, PPTX, etc.)
+├── extractors.py   # Text extraction
+├── pdf_utils.py    # PDF utilities
+├── renderers.py    # Native Office rendering
+└── verify.py       # Output verification
 ```
 
 ### Conversion Flow
@@ -204,10 +203,9 @@ SHA256: a1b2c3d4e5f6...
 
 ## Limitations
 
-- **Legacy formats** (`.doc`, `.ppt`) are not supported in the pure-Python path
-- **PDF → DOCX** prioritizes visual fidelity (pages as images) over editability
-- **PPTX → PDF** Python fallback is not pixel-perfect; use native renderers for best results
-- **Complex formatting** (advanced tables, custom fonts, embedded media) may not convert perfectly in fallback mode
+- **PDF → DOCX** embeds pages as images for visual fidelity (not editable)
+- **PPTX → PDF** with Python fallback is not pixel-perfect; use LibreOffice for best results
+- **Excel** complex formatting may not convert perfectly in Python mode
 
 ## Screenshots
 
@@ -241,3 +239,4 @@ MIT License — feel free to use this tool for personal and commercial projects.
 
 ---
 
+# pdfconverter
