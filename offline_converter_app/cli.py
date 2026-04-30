@@ -13,6 +13,28 @@ from .gui import launch_gui
 from .pdf_utils import compress_pdf, extract_pdf_images, merge_pdfs, split_pdf
 from .renderers import renderer_candidates
 
+VERSION = "1.0.0"
+
+_quiet = False
+
+
+def print_info(msg: str) -> None:
+    if not _quiet:
+        print(msg)
+
+
+def format_size(path: Path) -> str:
+    try:
+        size = path.stat().st_size
+        if size < 1024:
+            return f"{size}B"
+        elif size < 1024 * 1024:
+            return f"{size / 1024:.1f}KB"
+        else:
+            return f"{size / (1024 * 1024):.1f}MB"
+    except Exception:
+        return "unknown"
+
 
 def build_routes() -> list[tuple[str, str, str]]:
     return [
@@ -20,20 +42,23 @@ def build_routes() -> list[tuple[str, str, str]]:
         ("pdf", "docx", "PDF pages embedded into DOCX for higher visual fidelity"),
         ("pdf", "txt", "PDF text extracted to plain text"),
         ("pdf", "html", "PDF text extracted to HTML"),
-        ("pdf", "md", "PDF text extracted to Markdown-like text"),
+        ("pdf", "md", "PDF text extracted to Markdown"),
         ("pdf", "rtf", "PDF text extracted to RTF"),
         ("pdf", "pptx", "Each PDF page becomes an image slide"),
         ("pptx", "pdf", "Renderer-based PDF if available, otherwise Python fallback"),
         ("pptx", "txt", "Slide text extracted to plain text"),
+        ("xlsx", "pdf", "Excel spreadsheet rendered to PDF"),
+        ("xlsx", "txt", "Excel spreadsheet extracted to text"),
+        ("xlsx", "csv", "Excel spreadsheet exported to CSV"),
         ("txt", "pdf", "Plain text rendered to PDF"),
         ("txt", "docx", "Plain text written to DOCX"),
         ("txt", "pptx", "Plain text split into slides"),
-        ("md", "pdf", "Markdown-like text rendered to PDF"),
-        ("md", "docx", "Markdown-like text written to DOCX"),
-        ("html", "pdf", "HTML text rendered to PDF"),
-        ("html", "docx", "HTML text written to DOCX"),
-        ("rtf", "pdf", "RTF text rendered to PDF"),
-        ("rtf", "docx", "RTF text written to DOCX"),
+        ("md", "pdf", "Markdown rendered to PDF"),
+        ("md", "docx", "Markdown written to DOCX"),
+        ("html", "pdf", "HTML rendered to PDF"),
+        ("html", "docx", "HTML written to DOCX"),
+        ("rtf", "pdf", "RTF rendered to PDF"),
+        ("rtf", "docx", "RTF written to DOCX"),
         ("png/jpg/jpeg/bmp/gif/tiff/webp", "pdf", "Image wrapped into PDF"),
     ]
 
@@ -98,8 +123,21 @@ def doctor(tools: ToolState) -> int:
 
 
 def cmd_convert(args: argparse.Namespace, tools: ToolState) -> int:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     inputs = [Path(item).expanduser().resolve() for item in args.inputs]
+
+    for inp in inputs:
+        if not inp.exists():
+            print(f"Error: File not found: {inp}", file=sys.stderr)
+            return 1
+
     target_ext = args.to.lower().lstrip(".")
+
+    if not args.output and not args.output_dir and len(inputs) == 1:
+        output_path = inputs[0].parent / f"{inputs[0].stem}.{target_ext}"
+        args.output = str(output_path)
+
     if args.output and len(inputs) > 1:
         raise ValueError("Use --output-dir for multiple input files.")
 
@@ -120,18 +158,27 @@ def cmd_convert(args: argparse.Namespace, tools: ToolState) -> int:
                     sensitive=args.sensitive,
                 ),
             )
-            print(f"Converted: {inputs[0]} -> {output_path}")
+            print_info(f"Converted: {inputs[0]} -> {output_path} ({format_size(output_path)})")
             for line in format_report(report):
-                print(line)
+                print_info(line)
         else:
-            print(f"Skipped existing file: {output_path}")
+            print_info(f"Skipped: {output_path} (exists)")
         return 0
 
     output_dir = Path(args.output_dir or ".").expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    for input_path in inputs:
+
+    total = len(inputs)
+    max_workers = min(4, total)
+    converted = 0
+    failed = 0
+    skipped = 0
+
+    def convert_single(input_path: Path) -> tuple[str, str, str | None]:
         destination = output_path_for(input_path, output_dir, target_ext)
-        if ensure_output_allowed(destination, overwrite=args.overwrite, skip_existing=args.skip_existing):
+        if not ensure_output_allowed(destination, overwrite=args.overwrite, skip_existing=args.skip_existing):
+            return (input_path.name, destination.name, "skipped")
+        try:
             report = convert_one_with_options(
                 input_path,
                 target_ext,
@@ -144,24 +191,96 @@ def cmd_convert(args: argparse.Namespace, tools: ToolState) -> int:
                     sensitive=args.sensitive,
                 ),
             )
-            print(f"Converted: {input_path} -> {destination}")
-            for line in format_report(report):
-                print(line)
-        else:
-            print(f"Skipped existing file: {destination}")
-    return 0
+            return (input_path.name, destination.name, None)
+        except Exception as e:
+            return (input_path.name, destination.name, str(e))
+
+    if max_workers > 1:
+        print_info(f"Converting {total} files with {max_workers} workers...")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(convert_single, inp): inp for inp in inputs}
+            for future in as_completed(futures):
+                name, dest, error = future.result()
+                if error == "skipped":
+                    print_info(f"[skipped] {name}")
+                    skipped += 1
+                elif error:
+                    print_info(f"[failed] {name}: {error}")
+                    failed += 1
+                else:
+                    path = output_dir / dest
+                    print_info(f"[done] {name} -> {dest} ({format_size(path)})")
+                    converted += 1
+    else:
+        for idx, input_path in enumerate(inputs, 1):
+            destination = output_path_for(input_path, output_dir, target_ext)
+            print_info(f"[{idx}/{total}] Converting: {input_path.name}")
+            if ensure_output_allowed(destination, overwrite=args.overwrite, skip_existing=args.skip_existing):
+                try:
+                    report = convert_one_with_options(
+                        input_path,
+                        target_ext,
+                        destination,
+                        tools,
+                        ConversionOptions(
+                            ocr=args.ocr,
+                            ocr_lang=args.ocr_lang,
+                            mode=args.mode,
+                            sensitive=args.sensitive,
+                        ),
+                    )
+                    print_info(f"  -> {destination.name} ({format_size(destination)})")
+                    if not _quiet:
+                        for line in format_report(report):
+                            print_info(f"  {line}")
+                    converted += 1
+                except Exception as e:
+                    print_info(f"  -> FAILED: {e}")
+                    failed += 1
+            else:
+                print_info(f"  -> Skipped (exists)")
+                skipped += 1
+
+    print_info(f"Done. Converted: {converted}, skipped: {skipped}, failed: {failed}")
+    return 0 if failed == 0 else 1
 
 
 def cmd_convert_dir(args: argparse.Namespace, tools: ToolState) -> int:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     input_dir = Path(args.input_dir).expanduser().resolve()
+    if not input_dir.exists():
+        print(f"Error: Input directory not found: {input_dir}", file=sys.stderr)
+        return 1
+
     output_dir = Path(args.output_dir).expanduser().resolve()
-    inputs = collect_directory_inputs(input_dir, args.from_ext, args.recursive)
+
+    try:
+        inputs = collect_directory_inputs(input_dir, args.from_ext, args.recursive)
+    except ConversionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if not inputs:
+        print("Error: No files found to convert", file=sys.stderr)
+        return 1
+
     converted = 0
     skipped = 0
-    for input_path in inputs:
+    failed = 0
+    total = len(inputs)
+    max_workers = min(4, total)
+
+    print_info(f"Found {total} file(s) to convert")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    def convert_single(input_path: Path) -> tuple[str, str, str | None]:
         relative_parent = input_path.parent.relative_to(input_dir) if args.preserve_structure else Path()
         destination = output_path_for(input_path, output_dir / relative_parent, args.to)
-        if ensure_output_allowed(destination, overwrite=args.overwrite, skip_existing=args.skip_existing):
+        if not ensure_output_allowed(destination, overwrite=args.overwrite, skip_existing=args.skip_existing):
+            return (input_path.name, destination.name, "skipped")
+        try:
             report = convert_one_with_options(
                 input_path,
                 args.to,
@@ -174,15 +293,58 @@ def cmd_convert_dir(args: argparse.Namespace, tools: ToolState) -> int:
                     sensitive=args.sensitive,
                 ),
             )
-            print(f"Converted: {input_path} -> {destination}")
-            for line in format_report(report):
-                print(line)
-            converted += 1
-        else:
-            print(f"Skipped existing file: {destination}")
-            skipped += 1
-    print(f"Finished. Converted: {converted}, skipped: {skipped}")
-    return 0
+            return (input_path.name, destination.name, None)
+        except Exception as e:
+            return (input_path.name, destination.name, str(e))
+
+    if max_workers > 1 and total > 2:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(convert_single, inp): inp for inp in inputs}
+            for future in as_completed(futures):
+                name, dest, error = future.result()
+                if error == "skipped":
+                    print_info(f"[skipped] {name}")
+                    skipped += 1
+                elif error:
+                    print_info(f"[failed] {name}: {error}")
+                    failed += 1
+                else:
+                    path = output_dir / dest
+                    print_info(f"[done] {name} -> {dest} ({format_size(path)})")
+                    converted += 1
+    else:
+        for idx, input_path in enumerate(inputs, 1):
+            relative_parent = input_path.parent.relative_to(input_dir) if args.preserve_structure else Path()
+            destination = output_path_for(input_path, output_dir / relative_parent, args.to)
+            print_info(f"[{idx}/{total}] {input_path.name}")
+            if ensure_output_allowed(destination, overwrite=args.overwrite, skip_existing=args.skip_existing):
+                try:
+                    report = convert_one_with_options(
+                        input_path,
+                        args.to,
+                        destination,
+                        tools,
+                        ConversionOptions(
+                            ocr=args.ocr,
+                            ocr_lang=args.ocr_lang,
+                            mode=args.mode,
+                            sensitive=args.sensitive,
+                        ),
+                    )
+                    print_info(f"  -> {destination.name} ({format_size(destination)})")
+                    if not _quiet:
+                        for line in format_report(report):
+                            print_info(f"  {line}")
+                    converted += 1
+                except Exception as e:
+                    print_info(f"  -> FAILED: {e}")
+                    failed += 1
+            else:
+                print_info(f"  -> Skipped (exists)")
+                skipped += 1
+
+    print_info(f"Done. Converted: {converted}, skipped: {skipped}, failed: {failed}")
+    return 0 if failed == 0 else 1
 
 
 def cmd_merge_pdf(args: argparse.Namespace, _tools: ToolState) -> int:
@@ -460,9 +622,21 @@ def interactive_menu(tools: ToolState) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    global _quiet
+
     parser = argparse.ArgumentParser(
         description="Cross-platform offline document converter for privacy-sensitive files."
     )
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress non-essential output.")
+    parser.add_argument("--version", "-v", action="store_true", help="Show version number.")
+
+    args, _ = parser.parse_known_args()
+    _quiet = args.quiet
+
+    if args.version:
+        print(f"offline_converter v{VERSION}")
+        sys.exit(0)
+
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     cli_parser = subparsers.add_parser("cli", help="Launch the interactive terminal menu.")
@@ -551,6 +725,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
+
+    if argv and (argv[0] == "--version" or argv[0] == "-v"):
+        print(f"offline_converter v{VERSION}")
+        return 0
+
     tools = ToolState.detect()
     if not argv:
         return launch_gui(tools)
@@ -563,6 +742,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args, tools)
+    except ConversionError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        if "unsupported" in str(exc).lower() or "not supported" in str(exc).lower():
+            print("Tip: Run 'python offline_converter.py list' to see supported conversions.", file=sys.stderr)
+        return 1
+    except FileNotFoundError as exc:
+        print(f"Error: File not found: {exc}", file=sys.stderr)
+        return 1
+    except PermissionError as exc:
+        print(f"Error: Permission denied: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
+        print("Run 'python offline_converter.py doctor' to check your installation.", file=sys.stderr)
         return 1

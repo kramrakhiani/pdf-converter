@@ -1,293 +1,315 @@
-from __future__ import annotations
-
+import json
+import sys
 from pathlib import Path
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QListWidget, QComboBox, QLineEdit,
+    QCheckBox, QGroupBox, QFileDialog, QMessageBox, QProgressBar,
+    QTextEdit, QFrame
+)
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QIcon, QAction
 
 from .common import ConversionOptions, ToolState, ensure_output_allowed, output_path_for
 from .converter import convert_one_with_options
 from .pdf_utils import compress_pdf, merge_pdfs, split_pdf
-from .renderers import renderer_candidates
+
+CONFIG_FILE = Path.home() / ".offline_converter" / "gui_settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        if CONFIG_FILE.exists():
+            return json.loads(CONFIG_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def save_settings(settings: dict) -> None:
+    try:
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps(settings))
+    except Exception:
+        pass
+
+
+class ConverterWindow(QMainWindow):
+    def __init__(self, tools: ToolState):
+        super().__init__()
+        self.tools = tools
+        self.selected_files: list[Path] = []
+        self.load_settings()
+        self.init_ui()
+    
+    def load_settings(self) -> None:
+        s = load_settings()
+        self.output_dir = s.get("output_dir", str(Path.cwd()))
+        self.target_format = s.get("target", "pdf")
+        self.mode = s.get("mode", "auto")
+        self.ocr = s.get("ocr", False)
+        self.sensitive = s.get("sensitive", False)
+        self.overwrite = s.get("overwrite", False)
+        self.skip_existing = s.get("skip_existing", True)
+        self.dark_mode = s.get("dark_mode", False)
+    
+    def save_settings(self) -> None:
+        save_settings({
+            "output_dir": self.output_dir,
+            "target": self.target_format,
+            "mode": self.mode,
+            "ocr": self.ocr,
+            "sensitive": self.sensitive,
+            "overwrite": self.overwrite,
+            "skip_existing": self.skip_existing,
+            "dark_mode": self.dark_mode,
+        })
+    
+    def init_ui(self) -> None:
+        self.setWindowTitle("Offline Converter")
+        self.setMinimumSize(700, 600)
+        
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        
+        title = QLabel("Offline Document Converter")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title)
+        
+        file_group = QGroupBox("Input Files")
+        file_layout = QVBoxLayout(file_group)
+        
+        file_btn_layout = QHBoxLayout()
+        self.add_files_btn = QPushButton("Add Files")
+        self.add_files_btn.clicked.connect(self.add_files)
+        self.clear_btn = QPushButton("Clear")
+        self.clear_btn.clicked.connect(self.clear_files)
+        file_btn_layout.addWidget(self.add_files_btn)
+        file_btn_layout.addWidget(self.clear_btn)
+        file_btn_layout.addStretch()
+        file_layout.addLayout(file_btn_layout)
+        
+        self.file_list = QListWidget()
+        self.file_list.setMinimumHeight(100)
+        file_layout.addWidget(self.file_list)
+        layout.addWidget(file_group)
+        
+        settings_group = QGroupBox("Settings")
+        settings_layout = QHBoxLayout(settings_group)
+        
+        settings_layout.addWidget(QLabel("Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems(["pdf", "docx", "txt", "html", "md", "rtf", "pptx", "csv"])
+        self.format_combo.setCurrentText(self.target_format)
+        self.format_combo.currentTextChanged.connect(lambda t: setattr(self, 'target_format', t))
+        settings_layout.addWidget(self.format_combo)
+        
+        settings_layout.addWidget(QLabel("Mode:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["auto", "native", "python"])
+        self.mode_combo.setCurrentText(self.mode)
+        self.mode_combo.currentTextChanged.connect(lambda t: setattr(self, 'mode', t))
+        settings_layout.addWidget(self.mode_combo)
+        
+        settings_layout.addStretch()
+        layout.addWidget(settings_group)
+        
+        options_layout = QHBoxLayout()
+        self.ocr_check = QCheckBox("OCR")
+        self.ocr_check.setChecked(self.ocr)
+        self.ocr_check.stateChanged.connect(lambda s: setattr(self, 'ocr', bool(s)))
+        options_layout.addWidget(self.ocr_check)
+        
+        self.sensitive_check = QCheckBox("Sensitive Mode (300 DPI)")
+        self.sensitive_check.setChecked(self.sensitive)
+        self.sensitive_check.stateChanged.connect(lambda s: setattr(self, 'sensitive', bool(s)))
+        options_layout.addWidget(self.sensitive_check)
+        
+        self.overwrite_check = QCheckBox("Overwrite")
+        self.overwrite_check.setChecked(self.overwrite)
+        self.overwrite_check.stateChanged.connect(lambda s: setattr(self, 'overwrite', bool(s)))
+        options_layout.addWidget(self.overwrite_check)
+        
+        self.skip_check = QCheckBox("Skip Existing")
+        self.skip_check.setChecked(self.skip_existing)
+        self.skip_check.stateChanged.connect(lambda s: setattr(self, 'skip_existing', bool(s)))
+        options_layout.addWidget(self.skip_check)
+        
+        options_layout.addStretch()
+        layout.addLayout(options_layout)
+        
+        output_layout = QHBoxLayout()
+        output_layout.addWidget(QLabel("Output:"))
+        self.output_edit = QLineEdit(self.output_dir)
+        self.output_edit.textChanged.connect(lambda t: setattr(self, 'output_dir', t))
+        output_layout.addWidget(self.output_edit, 1)
+        
+        self.browse_btn = QPushButton("Browse")
+        self.browse_btn.clicked.connect(self.browse_output)
+        output_layout.addWidget(self.browse_btn)
+        layout.addLayout(output_layout)
+        
+        self.convert_btn = QPushButton("Convert Files")
+        self.convert_btn.setMinimumHeight(50)
+        self.convert_btn.setStyleSheet("background-color: #16a34a; color: white; font-size: 14px; font-weight: bold;")
+        self.convert_btn.clicked.connect(self.run_convert)
+        layout.addWidget(self.convert_btn)
+        
+        self.progress = QProgressBar()
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+        
+        results_group = QGroupBox("Results")
+        results_layout = QVBoxLayout(results_group)
+        self.results_text = QTextEdit()
+        self.results_text.setReadOnly(True)
+        self.results_text.setMaximumHeight(150)
+        results_layout.addWidget(self.results_text)
+        layout.addWidget(results_group)
+        
+        util_layout = QHBoxLayout()
+        self.merge_btn = QPushButton("Merge PDFs")
+        self.merge_btn.clicked.connect(self.merge_pdfs)
+        util_layout.addWidget(self.merge_btn)
+        
+        self.split_btn = QPushButton("Split PDF")
+        self.split_btn.clicked.connect(self.split_pdf)
+        util_layout.addWidget(self.split_btn)
+        
+        self.compress_btn = QPushButton("Compress PDF")
+        self.compress_btn.clicked.connect(self.compress_pdf)
+        util_layout.addWidget(self.compress_btn)
+        
+        util_layout.addStretch()
+        layout.addLayout(util_layout)
+        
+        self.statusBar().showMessage("Ready")
+    
+    def add_files(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(self, "Select Files", "", "All Files (*)")
+        for f in files:
+            p = Path(f)
+            if p not in self.selected_files:
+                self.selected_files.append(p)
+                self.file_list.addItem(p.name)
+    
+    def clear_files(self) -> None:
+        self.selected_files.clear()
+        self.file_list.clear()
+    
+    def browse_output(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder", self.output_dir)
+        if folder:
+            self.output_dir = folder
+            self.output_edit.setText(folder)
+    
+    def run_convert(self) -> None:
+        if not self.selected_files:
+            QMessageBox.warning(self, "No Files", "Please add files to convert.")
+            return
+        
+        self.save_settings()
+        self.convert_btn.setEnabled(False)
+        self.progress.setVisible(True)
+        self.progress.setMaximum(len(self.selected_files))
+        self.results_text.clear()
+        
+        output_dir = Path(self.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        success = 0
+        failed = 0
+        
+        for idx, input_path in enumerate(self.selected_files):
+            self.statusBar().showMessage(f"Converting: {input_path.name}")
+            self.progress.setValue(idx + 1)
+            QApplication.processEvents()
+            
+            dest = output_dir / f"{input_path.stem}.{self.target_format}"
+            
+            if dest.exists() and self.skip_existing:
+                self.results_text.append(f"Skipped: {dest.name}")
+                continue
+            
+            if dest.exists() and not self.overwrite:
+                self.results_text.append(f"Exists: {dest.name}")
+                failed += 1
+                continue
+            
+            try:
+                report = convert_one_with_options(
+                    input_path,
+                    self.target_format,
+                    dest,
+                    self.tools,
+                    ConversionOptions(
+                        ocr=self.ocr,
+                        mode=self.mode,
+                        sensitive=self.sensitive,
+                    )
+                )
+                self.results_text.append(f"✓ {dest.name} - {report.engine}")
+                success += 1
+            except Exception as e:
+                self.results_text.append(f"✗ {input_path.name}: {e}")
+                failed += 1
+        
+        self.statusBar().showMessage(f"Done: {success} converted, {failed} failed")
+        self.progress.setVisible(False)
+        self.convert_btn.setEnabled(True)
+        self.convert_btn.setText("✓ Convert Complete")
+        QTimer.singleShot(3000, lambda: self.convert_btn.setText("Convert Files"))
+    
+    def merge_pdfs(self) -> None:
+        files, _ = QFileDialog.getOpenFileNames(self, "Select PDFs to Merge", "", "PDF Files (*.pdf)")
+        if len(files) < 2:
+            return
+        
+        output, _ = QFileDialog.getSaveFileName(self, "Save Merged PDF", "", "PDF Files (*.pdf)")
+        if not output:
+            return
+        
+        try:
+            merge_pdfs([Path(f) for f in files], Path(output))
+            QMessageBox.information(self, "Done", f"Merged to:\n{output}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+    
+    def split_pdf(self) -> None:
+        file, _ = QFileDialog.getOpenFileName(self, "Select PDF to Split", "", "PDF Files (*.pdf)")
+        if not file:
+            return
+        
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if not folder:
+            return
+        
+        try:
+            split_pdf(Path(file), Path(folder))
+            QMessageBox.information(self, "Done", f"Split to:\n{folder}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+    
+    def compress_pdf(self) -> None:
+        file, _ = QFileDialog.getOpenFileName(self, "Select PDF to Compress", "", "PDF Files (*.pdf)")
+        if not file:
+            return
+        
+        output, _ = QFileDialog.getSaveFileName(self, "Save Compressed PDF", "", "PDF Files (*.pdf)")
+        if not output:
+            return
+        
+        try:
+            compress_pdf(Path(file), Path(output))
+            QMessageBox.information(self, "Done", f"Compressed to:\n{output}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
 
 
 def launch_gui(tools: ToolState) -> int:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
-
-    root = tk.Tk()
-    root.title("Offline Document Converter")
-    root.geometry("760x620")
-
-    status_var = tk.StringVar(value="Ready")
-    selected_inputs: list[Path] = []
-    output_dir_var = tk.StringVar(value=str(Path.cwd()))
-    target_var = tk.StringVar(value="pdf")
-    mode_var = tk.StringVar(value="auto")
-    ocr_var = tk.BooleanVar(value=False)
-    ocr_lang_var = tk.StringVar(value="eng")
-    sensitive_var = tk.BooleanVar(value=False)
-    overwrite_var = tk.BooleanVar(value=False)
-    skip_existing_var = tk.BooleanVar(value=True)
-
-    def refresh_input_list() -> None:
-        input_box.configure(state="normal")
-        input_box.delete("1.0", tk.END)
-        if selected_inputs:
-            input_box.insert(tk.END, "\n".join(str(path) for path in selected_inputs))
-        input_box.configure(state="disabled")
-
-    def choose_files() -> None:
-        nonlocal selected_inputs
-        files = filedialog.askopenfilenames(title="Choose files to convert")
-        if files:
-            selected_inputs = [Path(item).resolve() for item in files]
-            refresh_input_list()
-            status_var.set(f"Selected {len(selected_inputs)} file(s)")
-
-    def clear_files() -> None:
-        nonlocal selected_inputs
-        selected_inputs = []
-        refresh_input_list()
-        status_var.set("Selection cleared")
-
-    def choose_output_dir() -> None:
-        chosen = filedialog.askdirectory(title="Choose output directory")
-        if chosen:
-            output_dir_var.set(chosen)
-
-    def run_gui_convert() -> None:
-        if not selected_inputs:
-            messagebox.showerror("No files selected", "Choose at least one input file.")
-            return
-        output_dir = Path(output_dir_var.get()).expanduser().resolve()
-        target = target_var.get().strip().lower().lstrip(".")
-        if not target:
-            messagebox.showerror("Missing target format", "Enter a target format like pdf, docx, txt, or pptx.")
-            return
-
-        results: list[str] = []
-        try:
-            for input_path in selected_inputs:
-                destination = output_path_for(input_path, output_dir, target)
-                allowed = ensure_output_allowed(
-                    destination,
-                    overwrite=overwrite_var.get(),
-                    skip_existing=skip_existing_var.get(),
-                )
-                if not allowed:
-                    results.append(f"Skipped existing: {destination}")
-                    continue
-                report = convert_one_with_options(
-                    input_path,
-                    target,
-                    destination,
-                    tools,
-                    ConversionOptions(
-                        ocr=ocr_var.get(),
-                        ocr_lang=ocr_lang_var.get().strip() or "eng",
-                        mode=mode_var.get(),
-                        sensitive=sensitive_var.get(),
-                    ),
-                )
-                results.append(f"Converted: {destination}")
-                results.append(f"  Engine: {report.engine}")
-                results.append(f"  Fidelity: {report.fidelity}")
-                results.append(f"  Verified: {'yes' if report.verified else 'no'}")
-                if report.checksum:
-                    results.append(f"  SHA256: {report.checksum}")
-                for note in report.notes:
-                    results.append(f"  Note: {note}")
-        except Exception as exc:
-            messagebox.showerror("Conversion failed", str(exc))
-            status_var.set("Conversion failed")
-            return
-
-        result_box.configure(state="normal")
-        result_box.delete("1.0", tk.END)
-        result_box.insert(tk.END, "\n".join(results) if results else "Nothing to do.")
-        result_box.configure(state="disabled")
-        status_var.set("Finished")
-
-    def gui_merge() -> None:
-        files = filedialog.askopenfilenames(title="Choose PDFs to merge", filetypes=[("PDF files", "*.pdf")])
-        if len(files) < 2:
-            return
-        output = filedialog.asksaveasfilename(
-            title="Save merged PDF as",
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf")],
-        )
-        if not output:
-            return
-        try:
-            ensure_output_allowed(Path(output).resolve(), overwrite=overwrite_var.get(), skip_existing=False)
-            merge_pdfs([Path(item).resolve() for item in files], Path(output).resolve())
-            messagebox.showinfo("Done", f"Merged PDF saved to:\n{output}")
-            status_var.set("Merged PDFs")
-        except Exception as exc:
-            messagebox.showerror("Merge failed", str(exc))
-
-    def gui_split() -> None:
-        source = filedialog.askopenfilename(title="Choose PDF to split", filetypes=[("PDF files", "*.pdf")])
-        if not source:
-            return
-        out_dir = filedialog.askdirectory(title="Choose output folder")
-        if not out_dir:
-            return
-        try:
-            split_pdf(Path(source).resolve(), Path(out_dir).resolve())
-            messagebox.showinfo("Done", f"Split pages saved under:\n{out_dir}")
-            status_var.set("Split PDF")
-        except Exception as exc:
-            messagebox.showerror("Split failed", str(exc))
-
-    def gui_compress() -> None:
-        source = filedialog.askopenfilename(title="Choose PDF to compress", filetypes=[("PDF files", "*.pdf")])
-        if not source:
-            return
-        output = filedialog.asksaveasfilename(
-            title="Save compressed PDF as",
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf")],
-        )
-        if not output:
-            return
-        try:
-            ensure_output_allowed(Path(output).resolve(), overwrite=overwrite_var.get(), skip_existing=False)
-            compress_pdf(Path(source).resolve(), Path(output).resolve())
-            messagebox.showinfo("Done", f"Compressed PDF saved to:\n{output}")
-            status_var.set("Compressed PDF")
-        except Exception as exc:
-            messagebox.showerror("Compression failed", str(exc))
-
-    tool_lines = [
-        "PyMuPDF: ok",
-        "python-docx: ok",
-        "python-pptx: ok",
-        "reportlab: ok",
-        "pypdf: ok",
-        f"tesseract: {'ok' if tools.tesseract else 'optional / missing'}",
-        f"libreoffice: {'ok' if tools.libreoffice else 'optional / missing'}",
-    ]
-    if tools.platform == "Darwin":
-        tool_lines.append(
-            f"Microsoft Word (macOS): {'ok' if tools.osascript and tools.mac_word_app else 'optional / missing'}"
-        )
-        tool_lines.append(
-            f"Microsoft PowerPoint (macOS): {'ok' if tools.osascript and tools.mac_powerpoint_app else 'optional / missing'}"
-        )
-    elif tools.platform == "Windows":
-        tool_lines.append(f"Windows Office automation host: {'ok' if tools.powershell else 'optional / missing'}")
-
-    root.columnconfigure(0, weight=1)
-    root.rowconfigure(3, weight=1)
-
-    ttk.Label(root, text="Offline Document Converter", font=("Helvetica", 18, "bold")).grid(
-        row=0, column=0, sticky="w", padx=16, pady=(16, 4)
-    )
-    ttk.Label(
-        root,
-        text="Cross-platform local conversions for sensitive documents. No cloud upload step.",
-    ).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 12))
-
-    top = ttk.Frame(root, padding=16)
-    top.grid(row=2, column=0, sticky="nsew")
-    top.columnconfigure(1, weight=1)
-    top.rowconfigure(1, weight=1)
-
-    ttk.Label(top, text="Input files").grid(row=0, column=0, sticky="w")
-    buttons = ttk.Frame(top)
-    buttons.grid(row=0, column=1, sticky="e")
-    ttk.Button(buttons, text="Choose Files", command=choose_files).pack(side="left", padx=(0, 8))
-    ttk.Button(buttons, text="Clear", command=clear_files).pack(side="left")
-
-    input_box = tk.Text(top, height=8, wrap="word")
-    input_box.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(6, 12))
-    input_box.configure(state="disabled")
-
-    settings = ttk.Frame(top)
-    settings.grid(row=2, column=0, columnspan=2, sticky="ew")
-    settings.columnconfigure(1, weight=1)
-
-    ttk.Label(settings, text="Target format").grid(row=0, column=0, sticky="w")
-    ttk.Combobox(
-        settings,
-        textvariable=target_var,
-        values=["pdf", "docx", "txt", "html", "md", "rtf", "pptx"],
-        width=12,
-    ).grid(row=0, column=1, sticky="w", padx=(8, 20))
-
-    ttk.Label(settings, text="OCR language").grid(row=0, column=2, sticky="w")
-    ttk.Entry(settings, textvariable=ocr_lang_var, width=12).grid(row=0, column=3, sticky="w", padx=(8, 0))
-
-    ttk.Label(settings, text="Engine mode").grid(row=1, column=0, sticky="w", pady=(10, 0))
-    ttk.Combobox(
-        settings,
-        textvariable=mode_var,
-        values=["auto", "native", "python"],
-        width=12,
-        state="readonly",
-    ).grid(row=1, column=1, sticky="w", padx=(8, 20), pady=(10, 0))
-
-    ttk.Label(settings, text="Output folder").grid(row=2, column=0, sticky="w", pady=(10, 0))
-    ttk.Entry(settings, textvariable=output_dir_var).grid(
-        row=2, column=1, columnspan=2, sticky="ew", padx=(8, 8), pady=(10, 0)
-    )
-    ttk.Button(settings, text="Browse", command=choose_output_dir).grid(row=2, column=3, sticky="e", pady=(10, 0))
-
-    ttk.Label(settings, text="Renderer hints").grid(row=1, column=2, sticky="w", pady=(10, 0))
-    renderer_hint = tk.StringVar(value="Selected files will show engine info after conversion.")
-    ttk.Label(settings, textvariable=renderer_hint, wraplength=220).grid(row=1, column=3, sticky="w", pady=(10, 0))
-
-    toggles = ttk.Frame(top)
-    toggles.grid(row=3, column=0, columnspan=2, sticky="w", pady=(12, 12))
-    ttk.Checkbutton(toggles, text="Use OCR for PDFs", variable=ocr_var).pack(side="left", padx=(0, 14))
-    ttk.Checkbutton(
-        toggles,
-        text="Sensitive Document Mode",
-        variable=sensitive_var,
-    ).pack(side="left", padx=(0, 14))
-    ttk.Checkbutton(toggles, text="Overwrite existing files", variable=overwrite_var).pack(side="left", padx=(0, 14))
-    ttk.Checkbutton(toggles, text="Skip existing files", variable=skip_existing_var).pack(side="left")
-
-    def refresh_renderer_hint(*_args) -> None:
-        if not selected_inputs:
-            renderer_hint.set("Selected files will show engine info after conversion.")
-            return
-        exts = sorted({path.suffix.lower().lstrip(".") for path in selected_inputs})
-        hints = []
-        for ext in exts:
-            candidates = renderer_candidates(ext, tools)
-            if candidates:
-                hints.append(f".{ext}: {', '.join(candidates)}")
-            else:
-                hints.append(f".{ext}: python fallback")
-        renderer_hint.set(" | ".join(hints))
-
-    mode_var.trace_add("write", refresh_renderer_hint)
-    refresh_renderer_hint()
-
-    ttk.Button(top, text="Convert Files", command=run_gui_convert).grid(row=4, column=0, sticky="w")
-
-    utilities = ttk.LabelFrame(root, text="PDF Utilities", padding=16)
-    utilities.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 12))
-    ttk.Button(utilities, text="Merge PDFs", command=gui_merge).pack(side="left", padx=(0, 10))
-    ttk.Button(utilities, text="Split PDF", command=gui_split).pack(side="left", padx=(0, 10))
-    ttk.Button(utilities, text="Compress PDF", command=gui_compress).pack(side="left")
-
-    bottom = ttk.Frame(root, padding=(16, 0, 16, 16))
-    bottom.grid(row=4, column=0, sticky="nsew")
-    bottom.columnconfigure(0, weight=1)
-    bottom.columnconfigure(1, weight=1)
-
-    tool_frame = ttk.LabelFrame(bottom, text="Tool Status", padding=12)
-    tool_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    ttk.Label(tool_frame, text="\n".join(tool_lines), justify="left").pack(anchor="w")
-
-    result_frame = ttk.LabelFrame(bottom, text="Results", padding=12)
-    result_frame.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-    result_box = tk.Text(result_frame, height=10, wrap="word")
-    result_box.pack(fill="both", expand=True)
-    result_box.configure(state="disabled")
-
-    ttk.Label(root, textvariable=status_var, relief="sunken", anchor="w").grid(row=5, column=0, sticky="ew")
-    root.mainloop()
-    return 0
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    window = ConverterWindow(tools)
+    window.show()
+    return app.exec()

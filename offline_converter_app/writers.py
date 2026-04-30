@@ -23,8 +23,14 @@ from reportlab.platypus import Image as RLImage
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from reportlab.pdfgen import canvas
 
-from .common import clean_text
+from .common import ConversionError, clean_text
 from .extractors import read_pptx_slides
+
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
 
 
 def write_txt(text: str, output_path: Path) -> None:
@@ -66,36 +72,36 @@ def write_docx(text: str, output_path: Path) -> None:
     doc.save(str(output_path))
 
 
-def write_docx_from_pdf_pages(input_path: Path, output_path: Path) -> None:
+def write_docx_from_pdf_pages(input_path: Path, output_path: Path, *, dpi: int = 200) -> None:
     pdf_doc = fitz.open(str(input_path))
-    word_doc = Document()
-    section = word_doc.sections[0]
+    try:
+        word_doc = Document()
+        section = word_doc.sections[0]
 
-    if len(pdf_doc) > 0:
-        first_page = pdf_doc[0].rect
-        section.page_width = DocxPt(first_page.width)
-        section.page_height = DocxPt(first_page.height)
+        if len(pdf_doc) > 0:
+            first_page = pdf_doc[0].rect
+            section.page_width = DocxPt(first_page.width)
+            section.page_height = DocxPt(first_page.height)
 
-    section.top_margin = DocxPt(18)
-    section.bottom_margin = DocxPt(18)
-    section.left_margin = DocxPt(18)
-    section.right_margin = DocxPt(18)
+        section.top_margin = DocxPt(18)
+        section.bottom_margin = DocxPt(18)
+        section.left_margin = DocxPt(18)
+        section.right_margin = DocxPt(18)
 
-    with tempfile.TemporaryDirectory(prefix="offline-converter-") as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        for index, page in enumerate(pdf_doc, start=1):
-            pix = page.get_pixmap(dpi=150, alpha=False)
-            image_path = tmpdir_path / f"page-{index}.png"
-            pix.save(str(image_path))
-            paragraph = word_doc.add_paragraph()
-            run = paragraph.add_run()
-            usable_width = section.page_width - section.left_margin - section.right_margin
-            run.add_picture(str(image_path), width=usable_width)
-            if index < len(pdf_doc):
-                word_doc.add_page_break()
+        with tempfile.TemporaryDirectory(prefix="offline-converter-") as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            for index, page in enumerate(pdf_doc, start=1):
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
+                image_path = tmpdir_path / f"page-{index}.png"
+                pix.save(str(image_path))
+                run = word_doc.add_paragraph().add_run()
+                usable_width = section.page_width - section.left_margin - section.right_margin
+                run.add_picture(str(image_path), width=usable_width)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    word_doc.save(str(output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        word_doc.save(str(output_path))
+    finally:
+        pdf_doc.close()
 
 
 def _docx_paragraph_markup(paragraph) -> str:
@@ -383,11 +389,22 @@ def write_pdf_from_docx(path: Path, output_path: Path) -> None:
                 paragraph_style = heading_styles[style_name]
                 story.append(Paragraph(markup, paragraph_style))
             elif style_name.startswith("List"):
+                is_numbered = "Numbered" in style_name or re.match(r"^\d+[\.\)]", markup.strip())
+                if is_numbered:
+                    match = re.match(r"^(\d+[\.\)])\s*(.*)", markup.strip())
+                    if match:
+                        number, rest = match.groups()
+                        bullet_text = number
+                        markup = rest
+                    else:
+                        bullet_text = None
+                else:
+                    bullet_text = "•"
                 paragraph_style = ParagraphStyle(
                     f"Bullet-{id(paragraph)}",
                     parent=bullet_style,
                 )
-                story.append(Paragraph(markup, paragraph_style, bulletText="•"))
+                story.append(Paragraph(markup, paragraph_style, bulletText=bullet_text))
             else:
                 derived_style = ParagraphStyle(
                     f"Para-{id(paragraph)}",
@@ -427,25 +444,38 @@ def write_pdf_from_docx(path: Path, output_path: Path) -> None:
         elif tag == "tbl":
             table = next(tables)
             data = []
+            row_heights = []
             for row in table.rows:
-                data.append([Paragraph(html.escape(clean_text(cell.text) or " "), body_style) for cell in row.cells])
+                row_data = []
+                for cell in row.cells:
+                    cell_text = clean_text(cell.text) or " "
+                    para = Paragraph(cell_text, body_style)
+                    row_data.append(para)
+                data.append(row_data)
+                if row.height and row.height > 0:
+                    row_heights.append(row.height / 914400.0 * 72.0)
             if data:
-                rl_table = Table(data, repeatRows=1)
-                rl_table.setStyle(
-                    TableStyle(
-                        [
-                            ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f2f2f2")),
-                            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                            ("TOPPADDING", (0, 0), (-1, -1), 4),
-                            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-                        ]
-                    )
+                num_cols = max(len(row) for row in data) if data else 0
+                col_widths = [available_width / num_cols] * num_cols if num_cols > 0 else None
+                rl_table = Table(data, colWidths=col_widths, rowHeights=row_heights or None)
+                table_style = TableStyle(
+                    [
+                        ("GRID", (0, 0), (-1, -1), 0.5, colors.darkgrey),
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e6e6e6")),
+                        ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                        ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                        ("FONTSIZE", (0, 0), (-1, -1), 9),
+                    ]
                 )
+                rl_table.setStyle(table_style)
+                rl_table.hAlign = "LEFT"
                 story.append(rl_table)
-                story.append(Spacer(1, 10))
+                story.append(Spacer(1, 12))
 
     pdf = SimpleDocTemplate(
         str(output_path),
@@ -585,43 +615,94 @@ def write_pdf_from_pptx(path: Path, output_path: Path) -> None:
 
 
 def write_image_pdf(input_path: Path, output_path: Path) -> None:
-    image = Image.open(str(input_path))
-    if image.mode in ("RGBA", "LA", "P"):
-        image = image.convert("RGB")
+    ext = input_path.suffix.lower().lstrip(".")
+    if ext in {"heic", "heif"}:
+        try:
+            from pillow_heif import open_heif
+            image = open_heif(str(input_path))
+            if image.mode in ("RGBA", "LA", "P"):
+                image = image.convert("RGB")
+        except ImportError:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["magick", str(input_path), str(output_path)],
+                    capture_output=True,
+                    timeout=30,
+                )
+                if result.returncode == 0 and output_path.exists():
+                    return
+            except FileNotFoundError:
+                pass
+            raise ConversionError(f"HEIC conversion requires pillow-heif. Install with: pip install pillow-heif")
+    elif ext == "svg":
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["magick", "convert", str(input_path), "-density", "300", str(output_path)],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and output_path.exists():
+                return
+            result = subprocess.run(
+                ["rsvg-convert", "-d", "300", "-p", "300", "-o", str(output_path), str(input_path)],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and output_path.exists():
+                return
+        except FileNotFoundError:
+            pass
+        try:
+            from svglib.svglib import svg2rlg
+            from reportlab.graphics import renderPDF
+            drawing = svg2rlg(str(input_path))
+            renderPDF.drawToFile(drawing, str(output_path))
+            return
+        except ImportError:
+            raise ConversionError(f"SVG conversion requires svglib. Install with: pip install svglib")
+    else:
+        image = Image.open(str(input_path))
+        if image.mode in ("RGBA", "LA", "P"):
+            image = image.convert("RGB")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     image.save(str(output_path), "PDF", resolution=100.0)
 
 
-def pdf_to_pptx(input_path: Path, output_path: Path) -> None:
+def pdf_to_pptx(input_path: Path, output_path: Path, *, dpi: int = 200) -> None:
     doc = fitz.open(str(input_path))
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
+    try:
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
 
-    while prs.slides:
-        rel_id = prs.slides._sldIdLst[0].rId
-        prs.part.drop_rel(rel_id)
-        del prs.slides._sldIdLst[0]
+        while prs.slides:
+            rel_id = prs.slides._sldIdLst[0].rId
+            prs.part.drop_rel(rel_id)
+            del prs.slides._sldIdLst[0]
 
-    blank_layout = prs.slide_layouts[6]
-    with tempfile.TemporaryDirectory(prefix="offline-converter-") as tmpdir:
-        tmpdir_path = Path(tmpdir)
-        for index, page in enumerate(doc, start=1):
-            slide = prs.slides.add_slide(blank_layout)
-            pix = page.get_pixmap(dpi=150, alpha=False)
-            image_path = tmpdir_path / f"page-{index}.png"
-            pix.save(str(image_path))
-            with Image.open(str(image_path)) as img:
-                img_w, img_h = img.size
-            slide_w = prs.slide_width
-            slide_h = prs.slide_height
-            scale = min(slide_w / img_w, slide_h / img_h)
-            width = int(img_w * scale)
-            height = int(img_h * scale)
-            left = int((slide_w - width) / 2)
-            top = int((slide_h - height) / 2)
-            slide.shapes.add_picture(str(image_path), left, top, width=width, height=height)
-    prs.save(str(output_path))
+        blank_layout = prs.slide_layouts[6]
+        with tempfile.TemporaryDirectory(prefix="offline-converter-") as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            for index, page in enumerate(doc, start=1):
+                slide = prs.slides.add_slide(blank_layout)
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
+                image_path = tmpdir_path / f"page-{index}.png"
+                pix.save(str(image_path))
+                with Image.open(str(image_path)) as img:
+                    img_w, img_h = img.size
+                slide_w = prs.slide_width
+                slide_h = prs.slide_height
+                scale = min(slide_w / img_w, slide_h / img_h)
+                width = int(img_w * scale)
+                height = int(img_h * scale)
+                left = int((slide_w - width) / 2)
+                top = int((slide_h - height) / 2)
+                slide.shapes.add_picture(str(image_path), left, top, width=width, height=height)
+        prs.save(str(output_path))
+    finally:
+        doc.close()
 
 
 def text_to_pptx(text: str, output_path: Path, *, title: str = "Converted Deck") -> None:
@@ -641,3 +722,126 @@ def text_to_pptx(text: str, output_path: Path, *, title: str = "Converted Deck")
             paragraph.alignment = PP_ALIGN.LEFT
             paragraph.font.size = Pt(18)
     prs.save(str(output_path))
+
+
+def write_pdf_from_xlsx(input_path: Path, output_path: Path) -> tuple[str, ...]:
+    if not HAS_OPENPYXL:
+        raise ImportError("openpyxl is required for Excel conversion. Install with: pip install openpyxl")
+    wb = openpyxl.load_workbook(str(input_path), data_only=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pdf = canvas.Canvas(str(output_path), pagesize=letter)
+    page_width, page_height = letter
+    left_margin = 40
+    top_margin = 40
+    notes: list[str] = []
+    sheet_count = 0
+    for ws in wb.worksheets:
+        sheet_count += 1
+        if sheet_count > 1:
+            pdf.showPage()
+        pdf.setFont("Helvetica", 12)
+        pdf.drawString(left_margin, page_height - 30, f"Sheet: {ws.title}")
+        y = page_height - 60
+        max_col_widths = {}
+        for row_idx, row in enumerate(ws.iter_rows(values_only=True), start=1):
+            if y < 50:
+                pdf.showPage()
+                y = page_height - 40
+            x = left_margin
+            for col_idx, cell_value in enumerate(row):
+                if col_idx >= 10:
+                    break
+                col_width = max_col_widths.get(col_idx, 0)
+                cell_str = str(cell_value or "")
+                if len(cell_str) > col_width:
+                    max_col_widths[col_idx] = min(len(cell_str), 30)
+                pdf.setFont("Helvetica", 9)
+                pdf.drawString(x, y, cell_str[:30])
+                x += max_col_widths.get(col_idx, 80) + 10
+            y -= 15
+            if row_idx > 100:
+                notes.append(f"Sheet '{ws.title}' truncated at 100 rows.")
+                break
+    pdf.save()
+    result_notes = [f"Converted {sheet_count} sheet(s) from Excel."]
+    if sheet_count > 3:
+        result_notes.append("Consider using native Excel to PDF for complex spreadsheets.")
+    return tuple(result_notes)
+
+
+def write_xlsx_to_txt(input_path: Path, output_path: Path) -> None:
+    if not HAS_OPENPYXL:
+        raise ImportError("openpyxl is required for Excel conversion. Install with: pip install openpyxl")
+    wb = openpyxl.load_workbook(str(input_path), data_only=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for ws in wb.worksheets:
+        lines.append(f"=== Sheet: {ws.title} ===")
+        for row in ws.iter_rows(values_only=True):
+            row_str = " | ".join(str(cell or "") for cell in row)
+            lines.append(row_str)
+        lines.append("")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def write_xlsx_to_csv(input_path: Path, output_path: Path) -> None:
+    if not HAS_OPENPYXL:
+        raise ImportError("openpyxl is required for Excel conversion. Install with: pip install openpyxl")
+    wb = openpyxl.load_workbook(str(input_path), data_only=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    import csv
+    with open(output_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        for ws in wb.worksheets:
+            writer.writerow([f"=== Sheet: {ws.title} ==="])
+            for row in ws.iter_rows(values_only=True):
+                writer.writerow([str(cell or "") for cell in row])
+
+
+def write_pdf_from_doc(input_path: Path, output_path: Path) -> tuple[str, ...]:
+    notes: list[str] = []
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["antiword", str(input_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            write_pdf_from_text(result.stdout, output_path, title=input_path.stem)
+            notes.append("Used antiword for .doc to text conversion.")
+            return tuple(notes)
+    except FileNotFoundError:
+        pass
+    notes.append(".doc fallback: Converting via embedded image for visual fidelity.")
+    write_docx_from_pdf_pages_visual(input_path, output_path)
+    return tuple(notes)
+
+
+def write_docx_from_pdf_pages_visual(input_path: Path, output_path: Path) -> None:
+    pdf_doc = fitz.open(str(input_path))
+    try:
+        doc = Document()
+        section = doc.sections[0]
+        if len(pdf_doc) > 0:
+            first_page = pdf_doc[0].rect
+            section.page_width = DocxPt(first_page.width)
+            section.page_height = DocxPt(first_page.height)
+        section.top_margin = DocxPt(18)
+        section.bottom_margin = DocxPt(18)
+        section.left_margin = DocxPt(18)
+        section.right_margin = DocxPt(18)
+        with tempfile.TemporaryDirectory(prefix="offline-converter-") as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            for index, page in enumerate(pdf_doc, start=1):
+                pix = page.get_pixmap(dpi=200)
+                image_path = tmpdir_path / f"page-{index}.png"
+                pix.save(str(image_path))
+                run = doc.add_paragraph().add_run()
+                usable_width = section.page_width - section.left_margin - section.right_margin
+                run.add_picture(str(image_path), width=usable_width)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(output_path))
+    finally:
+        pdf_doc.close()

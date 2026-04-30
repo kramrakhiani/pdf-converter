@@ -4,3 +4,6 @@ python-pptx
 reportlab
 pypdf
 pillow
+openpyxl
+pytesseract
+PyQt6

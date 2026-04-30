@@ -52,17 +52,20 @@ def compress_pdf(input_path: Path, output_path: Path) -> None:
 def extract_pdf_images(input_path: Path, output_dir: Path) -> None:
     ensure_file(input_path)
     doc = fitz.open(str(input_path))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    count = 0
-    for page_index, page in enumerate(doc, start=1):
-        for image_index, image_info in enumerate(page.get_images(full=True), start=1):
-            xref = image_info[0]
-            image = doc.extract_image(xref)
-            ext = image["ext"]
-            data = image["image"]
-            out_path = output_dir / f"{input_path.stem}-p{page_index:03d}-{image_index:02d}.{ext}"
-            out_path.write_bytes(data)
-            count += 1
-    if count == 0:
-        raise ConversionError(f"No embedded images were found in {input_path}")
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for page_index, page in enumerate(doc, start=1):
+            for image_index, image_info in enumerate(page.get_images(full=True), start=1):
+                xref = image_info[0]
+                image = doc.extract_image(xref)
+                ext = image["ext"]
+                data = image["image"]
+                out_path = output_dir / f"{input_path.stem}-p{page_index:03d}-{image_index:02d}.{ext}"
+                out_path.write_bytes(data)
+                count += 1
+        if count == 0:
+            raise ConversionError(f"No embedded images were found in {input_path}")
+    finally:
+        doc.close()
 

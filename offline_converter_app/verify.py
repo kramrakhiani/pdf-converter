@@ -19,19 +19,33 @@ def verify_output(input_path: Path, output_path: Path, report: ConversionReport)
 
     if target_ext == "pdf":
         doc = fitz.open(str(output_path))
-        page_count = len(doc)
-        if page_count == 0:
-            raise ConversionError("Generated PDF has zero pages.")
-        notes.append(f"Verified PDF output: {page_count} page(s).")
-        if source_ext == "pptx":
-            try:
-                prs = Presentation(str(input_path))
-                if len(prs.slides) != page_count:
-                    notes.append(
-                        f"Slide/page count differs: source slides={len(prs.slides)}, output pages={page_count}."
-                    )
-            except Exception:
-                pass
+        try:
+            page_count = len(doc)
+            if page_count == 0:
+                raise ConversionError("Generated PDF has zero pages.")
+            corrupted = 0
+            for page_num, page in enumerate(doc, start=1):
+                try:
+                    page.get_text("text")
+                except Exception:
+                    corrupted += 1
+            if corrupted > 0:
+                notes.append(f"Warning: {corrupted} page(s) may have extraction issues.")
+            else:
+                notes.append(f"Verified PDF output: {page_count} page(s) - all pages readable.")
+            if page_count > 10:
+                notes.append("Note: Large PDF created. Consider compression if size is a concern.")
+            if source_ext == "pptx":
+                try:
+                    prs = Presentation(str(input_path))
+                    if len(prs.slides) != page_count:
+                        notes.append(
+                            f"Slide/page count differs: source slides={len(prs.slides)}, output pages={page_count}."
+                        )
+                except Exception:
+                    pass
+        finally:
+            doc.close()
     elif target_ext == "docx":
         doc = Document(str(output_path))
         paragraph_count = len(doc.paragraphs)
@@ -40,6 +54,7 @@ def verify_output(input_path: Path, output_path: Path, report: ConversionReport)
             f"Verified DOCX output: {paragraph_count} paragraph(s), {inline_shapes} inline object(s)."
         )
         if source_ext == "pdf":
+            source_pdf = None
             try:
                 source_pdf = fitz.open(str(input_path))
                 if inline_shapes < len(source_pdf):
@@ -48,6 +63,9 @@ def verify_output(input_path: Path, output_path: Path, report: ConversionReport)
                     )
             except Exception:
                 pass
+            finally:
+                if source_pdf:
+                    source_pdf.close()
     elif target_ext == "pptx":
         prs = Presentation(str(output_path))
         slide_count = len(prs.slides)
@@ -55,6 +73,7 @@ def verify_output(input_path: Path, output_path: Path, report: ConversionReport)
             raise ConversionError("Generated PPTX has zero slides.")
         notes.append(f"Verified PPTX output: {slide_count} slide(s).")
         if source_ext == "pdf":
+            source_pdf = None
             try:
                 source_pdf = fitz.open(str(input_path))
                 if slide_count != len(source_pdf):
@@ -63,6 +82,9 @@ def verify_output(input_path: Path, output_path: Path, report: ConversionReport)
                     )
             except Exception:
                 pass
+            finally:
+                if source_pdf:
+                    source_pdf.close()
     else:
         notes.append("Basic output existence check passed.")
 

@@ -2,7 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .common import ConversionError, ConversionOptions, ConversionReport, IMAGE_INPUTS, TEXT_INPUTS, WORD_INPUTS, ToolState, ensure_file, normalize_ext
+from .common import (
+    ConversionError,
+    ConversionOptions,
+    ConversionReport,
+    IMAGE_INPUTS,
+    SPREADSHEET_INPUTS,
+    TEXT_INPUTS,
+    WORD_INPUTS,
+    PRESENTATION_INPUTS,
+    ToolState,
+    ensure_file,
+    normalize_ext,
+    validate_file_type,
+)
 from .extractors import extract_text
 from .renderers import render_office_to_pdf
 from .verify import verify_output
@@ -17,8 +30,11 @@ from .writers import (
     write_pdf_from_docx,
     write_pdf_from_pptx,
     write_pdf_from_text,
+    write_pdf_from_xlsx,
     write_rtf,
     write_txt,
+    write_xlsx_to_csv,
+    write_xlsx_to_txt,
 )
 
 
@@ -60,8 +76,9 @@ def convert_one_with_options(
         raise ConversionError(f"Source and target formats are the same for {input_path.name}")
 
     if sensitive:
+        dpi = 300
         if target_ext == "docx" and source_ext == "pdf":
-            write_docx_from_pdf_pages(input_path, output_path)
+            write_docx_from_pdf_pages(input_path, output_path, dpi=dpi)
             return verify_output(
                 input_path,
                 output_path,
@@ -69,13 +86,14 @@ def convert_one_with_options(
                     engine="python-page-image-docx",
                     fidelity="visual-preserving",
                     notes=(
-                        "Sensitive Document Mode kept each PDF page as an image inside the DOCX.",
+                        f"Sensitive Document Mode used {dpi} DPI for maximum visual fidelity.",
+                        "Each PDF page was embedded as an image inside the DOCX.",
                         "This prioritizes appearance over editability.",
                     ),
                 ),
             )
         if target_ext == "pptx" and source_ext == "pdf":
-            pdf_to_pptx(input_path, output_path)
+            pdf_to_pptx(input_path, output_path, dpi=dpi)
             return verify_output(
                 input_path,
                 output_path,
@@ -83,7 +101,8 @@ def convert_one_with_options(
                     engine="python-page-image-pptx",
                     fidelity="visual-preserving",
                     notes=(
-                        "Sensitive Document Mode kept each PDF page as an image slide.",
+                        f"Sensitive Document Mode used {dpi} DPI for maximum visual fidelity.",
+                        "Each PDF page was embedded as an image slide.",
                         "This prioritizes appearance over editability.",
                     ),
                 ),
@@ -92,6 +111,10 @@ def convert_one_with_options(
             mode = "auto"
 
     if target_ext == "txt":
+        if source_ext in SPREADSHEET_INPUTS:
+            write_xlsx_to_txt(input_path, output_path)
+            return verify_output(input_path, output_path, ConversionReport(engine="python-excel-text", fidelity="reconstructed"))
+        
         write_txt(extract_text(input_path, tools, ocr=ocr, ocr_lang=ocr_lang), output_path)
         return verify_output(input_path, output_path, ConversionReport(engine="python-text", fidelity="reconstructed"))
     if target_ext == "md":
@@ -103,14 +126,20 @@ def convert_one_with_options(
     if target_ext == "rtf":
         write_rtf(extract_text(input_path, tools, ocr=ocr, ocr_lang=ocr_lang), output_path)
         return verify_output(input_path, output_path, ConversionReport(engine="python-text", fidelity="reconstructed"))
+    if target_ext == "csv":
+        if source_ext in SPREADSHEET_INPUTS:
+            write_xlsx_to_csv(input_path, output_path)
+            return verify_output(input_path, output_path, ConversionReport(engine="python-excel-csv", fidelity="reconstructed"))
+        raise ConversionError(f".{source_ext} -> .csv is not supported.")
     if target_ext == "docx":
         if source_ext == "pdf":
-            write_docx_from_pdf_pages(input_path, output_path)
+            write_docx_from_pdf_pages(input_path, output_path, dpi=200)
             return verify_output(input_path, output_path, ConversionReport(
                 engine="python-page-image-docx",
                 fidelity="visual-preserving",
                 notes=("Each PDF page was embedded as an image inside the DOCX.",),
             ))
+        
         write_docx(extract_text(input_path, tools, ocr=ocr, ocr_lang=ocr_lang), output_path)
         return verify_output(input_path, output_path, ConversionReport(engine="python-text", fidelity="reconstructed"))
     if target_ext == "pdf":
@@ -148,6 +177,9 @@ def convert_one_with_options(
             if native_failure_note:
                 notes = (native_failure_note, *notes)
             return verify_output(input_path, output_path, ConversionReport(engine="python-pptx-pdf", fidelity="fallback", notes=notes))
+        if source_ext in SPREADSHEET_INPUTS:
+            notes = write_pdf_from_xlsx(input_path, output_path)
+            return verify_output(input_path, output_path, ConversionReport(engine="python-excel-pdf", fidelity="reconstructed", notes=notes))
         write_pdf_from_text(
             extract_text(input_path, tools, ocr=ocr, ocr_lang=ocr_lang),
             output_path,
@@ -156,7 +188,7 @@ def convert_one_with_options(
         return verify_output(input_path, output_path, ConversionReport(engine="python-text-pdf", fidelity="reconstructed"))
     if target_ext == "pptx":
         if source_ext == "pdf":
-            pdf_to_pptx(input_path, output_path)
+            pdf_to_pptx(input_path, output_path, dpi=200)
             return verify_output(input_path, output_path, ConversionReport(
                 engine="python-page-image-pptx",
                 fidelity="visual-preserving",

@@ -9,9 +9,29 @@ from pathlib import Path
 
 
 TEXT_INPUTS = {"txt", "md", "markdown", "html", "htm", "rtf"}
-WORD_INPUTS = {"docx"}
-PRESENTATION_INPUTS = {"pptx"}
-IMAGE_INPUTS = {"png", "jpg", "jpeg", "bmp", "gif", "tiff", "webp"}
+WORD_INPUTS = {"docx", "doc"}
+PRESENTATION_INPUTS = {"pptx", "ppt"}
+IMAGE_INPUTS = {"png", "jpg", "jpeg", "bmp", "gif", "tiff", "webp", "heic", "heif", "svg", "ico", "jfif"}
+SPREADSHEET_INPUTS = {"xlsx", "xls"}
+
+MAGIC_BYTES = {
+    "pdf": b"%PDF",
+    "docx": b"PK\x03\x04",
+    "pptx": b"PK\x03\x04",
+    "xlsx": b"PK\x03\x04",
+    "doc": b"\xd0\xcf\x11\xe0",
+    "ppt": b"\xd0\xcf\x11\xe0",
+    "xls": b"\xd0\xcf\x11\xe0",
+    "png": b"\x89PNG",
+    "jpg": b"\xff\xd8\xff",
+    "jpeg": b"\xff\xd8\xff",
+    "gif": b"GIF8",
+    "bmp": b"BM",
+    "tiff": b"II\x2a\x00",
+    "webp": b"RIFF",
+    "heic": b"ftyp",
+    "heif": b"ftyp",
+}
 
 
 class ConversionError(RuntimeError):
@@ -124,3 +144,28 @@ def clean_text(text: str) -> str:
     text = re.sub(r"[ \t]+\n", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def validate_file_type(path: Path) -> str:
+    ext = normalize_ext(path)
+    with path.open("rb") as f:
+        header = f.read(12)
+    for file_type, magic in MAGIC_BYTES.items():
+        if header.startswith(magic):
+            return file_type
+    return ext
+
+
+def sanitize_path(path: Path, base_dir: Path) -> Path:
+    resolved = path.resolve()
+    base_resolved = base_dir.resolve()
+    if not str(resolved).startswith(str(base_resolved)):
+        raise ConversionError(f"Path traversal attempt detected: {path}")
+    return resolved
+
+
+def validate_output_path(output_path: Path) -> None:
+    dangerous_chars = ["..", "~", "$"]
+    for char in dangerous_chars:
+        if char in str(output_path):
+            raise ConversionError(f"Dangerous path component detected: {char}")

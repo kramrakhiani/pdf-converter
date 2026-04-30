@@ -191,3 +191,16 @@ ql-out/
 *.docx
 *.pptx
 *.heic
+*.txt
+*.html
+
+# GUI Settings
+.offline_converter/
+
+# Build artifacts
+*.spec
+build/
+dist/
+
+# Build script
+build.py
