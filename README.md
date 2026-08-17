@@ -1,6 +1,6 @@
 # Offline Document Converter
 
-A **privacy-first** document converter that runs 100% offline. Your files never leave your machine — no cloud uploads, no data collection. Perfect for sensitive documents like IDs, certificates, and personal records.
+A **privacy-first** document converter that runs 100% offline. Perfect for sensitive documents like IDs, certificates, and personal records.
 
 ## Quick Start
 
